@@ -1,0 +1,9 @@
+[package]
+name = "valkey-conn-storm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+redis = { version = "0.27", features = ["cluster", "cluster-async", "tokio-rustls-comp", "tls-rustls"] }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
