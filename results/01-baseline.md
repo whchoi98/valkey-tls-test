@@ -1,30 +1,34 @@
-# Valkey 8.2 TLS vs Non-TLS Connection Storm 테스트 결과
+# 베이스라인 테스트: Non-TLS vs TLS Connection Storm
+
+> 테스트 일시: 2026-04-01 16:52 UTC
+> 목적: TLS 전환이 connection storm 성능에 미치는 정량적 영향 측정
 
 ## 테스트 환경
 
-| 항목 | Non-TLS | TLS |
-|------|---------|-----|
+| 항목 | Non-TLS 클러스터 | TLS 클러스터 |
+|------|-----------------|-------------|
 | Replication Group | valkey-nontls-test | stviztlwuv2jozz |
-| 인스턴스 타입 | cache.r7g.large | cache.r7g.large |
+| 인스턴스 타입 | cache.r7g.large (2 vCPU) | cache.r7g.large (2 vCPU) |
 | 엔진 | Valkey 8.2.0 | Valkey 8.2.0 |
-| Cluster Mode | Enabled (1 shard) | Enabled (2 shard) |
+| Cluster Mode | Enabled, 1 shard | Enabled, 2 shard |
 | 구성 | 1 master + 1 replica | 2 master + 2 replica |
 | Transit Encryption | Disabled | Required |
-| At-Rest Encryption | Disabled | Enabled |
 | 리전 | ap-northeast-2 | ap-northeast-2 |
 
-### 클라이언트 환경
-- EC2: c7g.xlarge (ARM64, 4 vCPU) — 동일 VPC 내 Private Subnet
+### 클라이언트
+
+- EC2: c7g.xlarge (ARM64, 4 vCPU, 8 GiB)
 - OS: Amazon Linux 2023
-- 테스트 도구: Rust ClusterClient (redis crate v0.27, tokio async runtime)
-- 각 동시접속 단위로 독립 ClusterClient 생성 → get_connection() → check_connection()
+- 위치: 동일 VPC Private Subnet (ap-northeast-2a)
+- 테스트 도구: Rust redis crate v0.27 ClusterClient (동기 모드)
+- 테스트 방식: 각 동시접속 단위로 독립 ClusterClient 생성 → get_connection() → check_connection() (PING)
 - 타임아웃: 15초
 
 ---
 
-## 테스트 결과
+## 결과
 
-### Non-TLS (r7g.large, 1 shard)
+### Non-TLS Storm (r7g.large, 1 shard)
 
 | 동시접속 | Wall Time | 성공 | 성공률 | 처리량 |
 |----------|-----------|------|--------|--------|
@@ -36,7 +40,7 @@
 | 1,000 | 15.0s | 640/1000 | 64.0% | 43 c/s |
 | 2,000 | 15.0s | 464/2000 | 23.2% | 31 c/s |
 
-### TLS (r7g.large, 2 shard)
+### TLS Storm (r7g.large, 2 shard, required)
 
 | 동시접속 | Wall Time | 성공 | 성공률 | 처리량 |
 |----------|-----------|------|--------|--------|
@@ -52,57 +56,56 @@
 
 ## 비교 분석
 
-### 소규모 동시접속 (10~100)
+### Wall Time 비교
 
 | 동시접속 | Non-TLS | TLS | TLS 오버헤드 |
 |----------|---------|-----|-------------|
-| 10 | 10ms | 129ms | **12.9x** |
-| 50 | 16ms | 199ms | **12.4x** |
-| 100 | 19ms | 5.3s | **279x** |
+| 10 | 10ms | 129ms | 12.9x |
+| 50 | 16ms | 199ms | 12.4x |
+| 100 | 19ms | 5.3s | 279x |
+| 200 | 5.0s | 5.4s | 1.08x |
+| 500 | 10.0s | 15.3s | 1.53x |
 
-- 10~50 동시접속: TLS 핸드셰이크 오버헤드로 약 **12~13배** 느림
-- 100 동시접속: Non-TLS는 19ms에 완료, TLS는 5.3초 소요 (서버 측 TLS 처리 병목)
+### 성공률 비교
 
-### 대규모 동시접속 (200~2000)
+| 동시접속 | Non-TLS | TLS | 차이 |
+|----------|---------|-----|------|
+| 200 | 100% | 100% | 동일 |
+| 500 | 94.6% | 30.2% | -64.4%p |
+| 1,000 | 64.0% | 57.8% | -6.2%p |
+| 2,000 | 23.2% | 50.6% | +27.4%p |
 
-| 동시접속 | Non-TLS 성공률 | TLS 성공률 |
-|----------|---------------|-----------|
-| 200 | 100% | 100% |
-| 500 | 94.6% | 30.2% |
-| 1,000 | 64.0% | 57.8% |
-| 2,000 | 23.2% | 50.6% |
-
-- 500 동시접속에서 TLS 성공률이 30.2%로 급격히 하락
-- Non-TLS도 500+ 에서 타임아웃 발생 (r7g.large의 네트워크/커넥션 한계)
-
-### 피크 처리량 비교
+### 피크 처리량
 
 | 지표 | Non-TLS | TLS | 배율 |
 |------|---------|-----|------|
-| 최대 처리량 (c/s) | ~5,263 (100 conns) | ~251 (50 conns) | **~21x** |
-| 100% 성공 최대 동시접속 | 200 | 200 | 동일 |
-| 100% 성공 시 wall time (200 conns) | 5.0s | 5.4s | 1.08x |
+| 최대 처리량 | ~5,263 c/s (100 conns) | ~251 c/s (50 conns) | **~21x** |
 
 ---
 
-## 핵심 발견사항
+## 인사이트
 
-1. **TLS 핸드셰이크 레이턴시**: 소규모(10~50) 동시접속에서 Non-TLS 대비 약 12~13배 느림
-2. **TLS 처리량 병목**: 피크 처리량 기준 Non-TLS 대비 약 21배 차이
-3. **서버 측 TLS 처리 한계**: 100 동시접속부터 TLS 서버 측 핸드셰이크 처리가 병목 (5초+ 소요)
-4. **r7g.large 한계**: Non-TLS도 500+ 동시접속에서 타임아웃 발생 — 인스턴스 크기 한계
-5. **2 shard TLS가 1 shard Non-TLS보다 느림**: TLS 오버헤드가 shard 추가 효과를 상쇄
+1. **TLS 핸드셰이크 순수 오버헤드 (10~50 conns)**
+   - TLS가 Non-TLS 대비 약 12~13배 느림
+   - 이 구간에서는 서버 측 병목 없이 순수 TLS 핸드셰이크 비용만 반영
+   - 단일 TLS 핸드셰이크에 약 10~13ms 소요 (129ms / 10 conns ≈ 13ms/conn)
 
----
+2. **서버 측 TLS 처리 병목 (100 conns)**
+   - Non-TLS는 19ms에 100개 연결 완료 (서버 측 TCP accept가 매우 빠름)
+   - TLS는 5.3초 소요 — **279배 차이**
+   - 서버가 TLS 핸드셰이크를 직렬 또는 제한된 병렬로 처리하면서 병목 발생
+   - Valkey의 `max-new-tls-connections-per-cycle` 파라미터가 낮게 설정되어 있을 가능성
 
-## 참고사항
+3. **r7g.large 인스턴스 한계 (200+ conns)**
+   - 200 conns에서 Non-TLS도 5초 소요 — 서버 측 연결 수락 처리 한계
+   - 500+ conns에서 양쪽 모두 타임아웃 발생
+   - r7g.large의 2 vCPU로는 대량 동시 연결 처리에 물리적 한계
 
-- 기존 제공된 테스트 결과(Non-TLS ~2,291 c/s, TLS ~53 c/s, 43배 차이)와 비교하면, 이번 테스트에서도 유사한 경향 확인 (21배 차이)
-- 차이 원인: 기존 테스트는 r7g.2xlarge TLS + 1 shard, 이번 테스트는 r7g.large TLS + 2 shard
-- 클라이언트 구현 방식(Rust redis crate의 ClusterClient 동기 모드)에 따라 절대 수치는 달라질 수 있음
-- 실제 운영 환경에서는 connection pooling으로 초기 연결 비용을 분산하는 것이 권장됨
+4. **2,000 conns에서 TLS가 Non-TLS보다 높은 성공률 (50.6% vs 23.2%)**
+   - 역설적 결과: TLS가 느리기 때문에 연결이 시간 분산되어 서버 부하가 평탄화
+   - Non-TLS는 너무 빨리 몰려서 서버가 한꺼번에 과부하
 
----
-
-*테스트 일시: 2026-04-01 16:52 UTC*
-*테스트 클라이언트: c7g.xlarge (ap-northeast-2a), 동일 VPC Private Subnet*
+5. **피크 처리량 21배 차이**
+   - Non-TLS: 100 conns에서 5,263 c/s (서버가 여유 있는 구간)
+   - TLS: 50 conns에서 251 c/s (이미 핸드셰이크 오버헤드 반영)
+   - 실제 운영에서 connection storm이 발생하면 TLS 환경에서 심각한 서비스 영향
