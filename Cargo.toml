@@ -7,3 +7,4 @@ edition = "2021"
 redis = { version = "0.27", features = ["cluster", "cluster-async", "tokio-rustls-comp", "tls-rustls"] }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
+rand = "0.8"

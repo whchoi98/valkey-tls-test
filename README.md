@@ -343,12 +343,40 @@ export SECURITY_GROUP="sg-xxxxxxxxx"
 ./infra/cleanup-clusters.sh
 ```
 
+## Cascading Failure 재현 및 완화 테스트
+
+실제 장애 시나리오(HPA 스케일아웃 → TLS connection storm → 무한 재시도 → 메모리 폭주)를 재현하고, 완화 방안의 효과를 검증합니다.
+
+```bash
+# 장애 재현: 500 pods, 10회 재시도, 백오프 없음
+./target/release/cascade --endpoint <host>:<port> --tls --pods 500 --retries 10 --backoff none
+
+# 완화: 지수 백오프 + 재시도 제한
+./target/release/cascade --endpoint <host>:<port> --tls --pods 500 --retries 3 --backoff exponential
+
+# 완화: HPA 속도 제한 + 백오프
+./target/release/cascade --endpoint <host>:<port> --tls --pods 200 --retries 3 --backoff exponential
+```
+
+### 결과 요약
+
+| 시나리오 | 총 시도 | 성공률 | 증폭 배율 | 서버 부하 |
+|----------|---------|--------|----------|----------|
+| 장애 재현 (500 pods, 10 retries, no backoff) | 1,170 | 100% | 2.3x | ❌ 최대 |
+| Fail fast (500 pods, no retry) | 500 | 9.2% | 1.0x | ⚠️ 1회성 |
+| 백오프 (500 pods, 3 retries, exp backoff) | 1,150 | 100% | 2.3x | ⚠️ 시간 분산 |
+| **HPA 제한 + 백오프 (200 pods, 3 retries)** | **403** | **100%** | **2.0x** | ✅ **65% 감소** |
+
+상세 결과: [results/03-cascading-failure.md](results/03-cascading-failure.md)
+
 ## 프로젝트 구조
 
 ```
 valkey-tls-test/
 ├── Cargo.toml                       # Rust 프로젝트 설정
-├── src/main.rs                      # 벤치마크 도구 (storm/pool 모드)
+├── src/
+│   ├── main.rs                      # 벤치마크 도구 (storm/pool 모드)
+│   └── bin/cascade.rs               # Cascading failure 재현/완화 도구
 ├── infra/
 │   ├── create-clusters.sh           # ElastiCache 클러스터 생성 (Non-TLS, TLS 2/4 shard)
 │   └── cleanup-clusters.sh          # 클러스터 정리
@@ -356,7 +384,8 @@ valkey-tls-test/
 │   └── run-tests.sh                 # 전체 테스트 자동 실행
 ├── results/
 │   ├── 01-baseline.md               # Non-TLS vs TLS 베이스라인 결과
-│   └── 02-improvement-tests.md      # 개선방안 비교 테스트 결과
+│   ├── 02-improvement-tests.md      # 개선방안 비교 테스트 결과
+│   └── 03-cascading-failure.md      # Cascading failure 재현/완화 결과
 └── userdata.sh                      # EC2 테스트 인스턴스 user-data
 ```
 
