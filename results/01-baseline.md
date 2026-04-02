@@ -1,3 +1,13 @@
+<div align="center">
+
+🇰🇷 [한국어](#한국어) | 🇺🇸 [English](#english)
+
+</div>
+
+---
+
+# 한국어
+
 # 베이스라인 테스트: Non-TLS vs TLS Connection Storm
 
 > 테스트 일시: 2026-04-01 16:52 UTC
@@ -109,3 +119,119 @@
    - Non-TLS: 100 conns에서 5,263 c/s (서버가 여유 있는 구간)
    - TLS: 50 conns에서 251 c/s (이미 핸드셰이크 오버헤드 반영)
    - 실제 운영에서 connection storm이 발생하면 TLS 환경에서 심각한 서비스 영향
+
+---
+
+# English
+
+# Baseline Test: Non-TLS vs TLS Connection Storm
+
+> Test Date: 2026-04-01 16:52 UTC
+> Purpose: Quantitative measurement of TLS transition impact on connection storm performance
+
+## Test Environment
+
+| Item | Non-TLS Cluster | TLS Cluster |
+|------|----------------|-------------|
+| Replication Group | valkey-nontls-test | stviztlwuv2jozz |
+| Instance Type | cache.r7g.large (2 vCPU) | cache.r7g.large (2 vCPU) |
+| Engine | Valkey 8.2.0 | Valkey 8.2.0 |
+| Cluster Mode | Enabled, 1 shard | Enabled, 2 shard |
+| Config | 1 master + 1 replica | 2 master + 2 replica |
+| Transit Encryption | Disabled | Required |
+| Region | ap-northeast-2 | ap-northeast-2 |
+
+### Client
+
+- EC2: c7g.xlarge (ARM64, 4 vCPU, 8 GiB)
+- OS: Amazon Linux 2023
+- Location: Same VPC Private Subnet (ap-northeast-2a)
+- Test Tool: Rust redis crate v0.27 ClusterClient (sync mode)
+- Method: Independent ClusterClient per concurrent connection → get_connection() → check_connection() (PING)
+- Timeout: 15 seconds
+
+---
+
+## Results
+
+### Non-TLS Storm (r7g.large, 1 shard)
+
+| Concurrency | Wall Time | Success | Rate | Throughput |
+|-------------|-----------|---------|------|------------|
+| 10 | 10ms | 10/10 | 100% | 1,000 c/s |
+| 50 | 16ms | 50/50 | 100% | 3,125 c/s |
+| 100 | 19ms | 100/100 | 100% | 5,263 c/s |
+| 200 | 5.0s | 200/200 | 100% | 40 c/s |
+| 500 | 10.0s | 473/500 | 94.6% | 47 c/s |
+| 1,000 | 15.0s | 640/1000 | 64.0% | 43 c/s |
+| 2,000 | 15.0s | 464/2000 | 23.2% | 31 c/s |
+
+### TLS Storm (r7g.large, 2 shard, required)
+
+| Concurrency | Wall Time | Success | Rate | Throughput |
+|-------------|-----------|---------|------|------------|
+| 10 | 129ms | 10/10 | 100% | 78 c/s |
+| 50 | 199ms | 50/50 | 100% | 251 c/s |
+| 100 | 5.3s | 100/100 | 100% | 19 c/s |
+| 200 | 5.4s | 200/200 | 100% | 37 c/s |
+| 500 | 15.3s | 151/500 | 30.2% | 10 c/s |
+| 1,000 | 15.3s | 578/1000 | 57.8% | 38 c/s |
+| 2,000 | 15.1s | 1012/2000 | 50.6% | 67 c/s |
+
+---
+
+## Comparative Analysis
+
+### Wall Time Comparison
+
+| Concurrency | Non-TLS | TLS | TLS Overhead |
+|-------------|---------|-----|-------------|
+| 10 | 10ms | 129ms | 12.9x |
+| 50 | 16ms | 199ms | 12.4x |
+| 100 | 19ms | 5.3s | 279x |
+| 200 | 5.0s | 5.4s | 1.08x |
+| 500 | 10.0s | 15.3s | 1.53x |
+
+### Success Rate Comparison
+
+| Concurrency | Non-TLS | TLS | Difference |
+|-------------|---------|-----|------------|
+| 200 | 100% | 100% | Same |
+| 500 | 94.6% | 30.2% | -64.4%p |
+| 1,000 | 64.0% | 57.8% | -6.2%p |
+| 2,000 | 23.2% | 50.6% | +27.4%p |
+
+### Peak Throughput
+
+| Metric | Non-TLS | TLS | Ratio |
+|--------|---------|-----|-------|
+| Max Throughput | ~5,263 c/s (100 conns) | ~251 c/s (50 conns) | **~21x** |
+
+---
+
+## Insights
+
+1. **Pure TLS Handshake Overhead (10~50 conns)**
+   - TLS is ~12~13x slower than Non-TLS
+   - In this range, only pure TLS handshake cost is reflected without server-side bottleneck
+   - Single TLS handshake takes ~10~13ms (129ms / 10 conns ≈ 13ms/conn)
+
+2. **Server-side TLS Processing Bottleneck (100 conns)**
+   - Non-TLS completes 100 connections in 19ms (server-side TCP accept is very fast)
+   - TLS takes 5.3 seconds — **279x difference**
+   - Bottleneck occurs as server processes TLS handshakes serially or with limited parallelism
+   - Valkey's `max-new-tls-connections-per-cycle` parameter may be set low
+
+3. **r7g.large Instance Limits (200+ conns)**
+   - At 200 conns, even Non-TLS takes 5 seconds — server-side connection acceptance limit
+   - At 500+ conns, both sides experience timeouts
+   - r7g.large's 2 vCPU has physical limits for mass concurrent connection handling
+
+4. **TLS Higher Success Rate at 2,000 conns (50.6% vs 23.2%)**
+   - Paradoxical result: TLS being slower causes connections to be time-distributed, flattening server load
+   - Non-TLS connections arrive too fast, overwhelming the server simultaneously
+
+5. **21x Peak Throughput Difference**
+   - Non-TLS: 5,263 c/s at 100 conns (server has headroom)
+   - TLS: 251 c/s at 50 conns (handshake overhead already reflected)
+   - In production, connection storms in TLS environments cause severe service impact

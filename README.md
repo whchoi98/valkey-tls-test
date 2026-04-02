@@ -1,4 +1,14 @@
+<div align="center">
+
 # Valkey TLS Connection Storm Benchmark
+
+🇰🇷 [한국어](#한국어) | 🇺🇸 [English](#english)
+
+</div>
+
+---
+
+# 한국어
 
 Amazon ElastiCache for Valkey 8.2에서 Non-TLS → TLS required 전환 시 connection storm 성능 영향을 정량적으로 측정하고, 세 가지 개선방안의 실효성을 검증하는 벤치마크 프로젝트입니다.
 
@@ -40,186 +50,16 @@ Valkey/Redis 클러스터를 Non-TLS에서 TLS required로 전환하면, 모든 
 | `storm` | 매 동시접속마다 새 ClusterClient 생성 → 연결 → PING | 배포/재시작 시 connection storm |
 | `pool` | 단일 ClusterClient를 warm-up 후 공유, 동시에 get_connection() | Connection pool 사용 패턴 |
 
----
-
 ## 테스트 결과
 
-### 베이스라인: Non-TLS vs TLS Connection Storm
+상세 결과는 아래 링크를 참조하세요:
+- [01. 베이스라인: Non-TLS vs TLS](results/01-baseline.md)
+- [02. 개선방안 비교 테스트](results/02-improvement-tests.md)
+- [03. Cascading Failure 재현/완화](results/03-cascading-failure.md)
 
-> 가장 기본적인 비교. 동일 조건에서 TLS 유무에 따른 성능 차이 측정.
+### 종합 비교
 
-**Non-TLS Storm (r7g.large, 1 shard)**
-
-| 동시접속 | Wall Time | 성공 | 성공률 | 처리량 |
-|----------|-----------|------|--------|--------|
-| 10 | 10ms | 10/10 | 100% | 1,000 c/s |
-| 50 | 16ms | 50/50 | 100% | 3,125 c/s |
-| 100 | 19ms | 100/100 | 100% | 5,263 c/s |
-| 200 | 5.0s | 200/200 | 100% | 40 c/s |
-| 500 | 10.0s | 473/500 | 94.6% | 47 c/s |
-| 1,000 | 15.0s | 640/1000 | 64.0% | 43 c/s |
-| 2,000 | 15.0s | 464/2000 | 23.2% | 31 c/s |
-
-**TLS Storm (r7g.large, 2 shard, required)**
-
-| 동시접속 | Wall Time | 성공 | 성공률 | 처리량 |
-|----------|-----------|------|--------|--------|
-| 10 | 129ms | 10/10 | 100% | 78 c/s |
-| 50 | 199ms | 50/50 | 100% | 251 c/s |
-| 100 | 5.3s | 100/100 | 100% | 19 c/s |
-| 200 | 5.4s | 200/200 | 100% | 37 c/s |
-| 500 | 15.3s | 151/500 | 30.2% | 10 c/s |
-| 1,000 | 15.3s | 578/1000 | 57.8% | 38 c/s |
-| 2,000 | 15.1s | 1012/2000 | 50.6% | 67 c/s |
-
-**베이스라인 인사이트:**
-
-- 소규모(10~50 conns): TLS가 Non-TLS 대비 **12~13배 느림** (10ms vs 129ms). 이는 순수 TLS 핸드셰이크 오버헤드
-- 100 conns: Non-TLS는 19ms에 완료되지만, TLS는 **5.3초** 소요. 서버 측 TLS 핸드셰이크 처리가 직렬화되면서 병목 발생
-- 200 conns: 양쪽 모두 5초대로 수렴. Non-TLS도 서버 측 연결 수락 한계에 도달
-- 500+ conns: TLS 성공률 30%로 급락. Non-TLS도 94.6%로 하락하지만 TLS가 3배 더 나쁨
-- 피크 처리량: Non-TLS ~5,263 c/s vs TLS ~251 c/s — **약 21배 차이**
-
----
-
-### 개선방안 1: transit-encryption-mode preferred
-
-> TLS 클러스터를 `required` → `preferred`로 전환하면 동일 포트(6379)에서 TLS/Non-TLS 양쪽 연결을 모두 수락합니다. 성능이 중요한 내부 트래픽은 Non-TLS로 연결하여 TLS 오버헤드를 회피하는 전략.
-
-**preferred 모드 — Non-TLS 연결 (storm)**
-
-| 동시접속 | Wall Time | 성공 | 성공률 | 처리량 |
-|----------|-----------|------|--------|--------|
-| 10 | 22ms | 10/10 | 100% | 455 c/s |
-| 50 | 26ms | 50/50 | 100% | 1,923 c/s |
-| 100 | 5.1s | 100/100 | 100% | 20 c/s |
-| 200 | 10.1s | 180/200 | 90% | 18 c/s |
-| 500 | 15.0s | 5/500 | **1%** | 0 c/s |
-| 1,000 | 15.0s | 9/1000 | **0.9%** | 1 c/s |
-| 2,000 | 15.0s | 0/2000 | **0%** | 0 c/s |
-
-**preferred 모드 — TLS 연결 (storm, 동일 클러스터)**
-
-| 동시접속 | Wall Time | 성공 | 성공률 | 처리량 |
-|----------|-----------|------|--------|--------|
-| 10 | 137ms | 10/10 | 100% | 73 c/s |
-| 50 | 218ms | 50/50 | 100% | 229 c/s |
-| 100 | 5.3s | 100/100 | 100% | 19 c/s |
-| 200 | 5.4s | 200/200 | 100% | 37 c/s |
-| 500 | 15.2s | 69/500 | 13.8% | 5 c/s |
-| 1,000 | 15.0s | 541/1000 | 54.1% | 36 c/s |
-| 2,000 | 15.0s | 1007/2000 | 50.4% | 67 c/s |
-
-**개선방안 1 인사이트:**
-
-- 소규모(10~50 conns): Non-TLS 연결이 **22ms / 26ms**로 순수 Non-TLS 클러스터(10ms / 16ms)에 근접. TLS 대비 **6~8배 빠름**
-- 100 conns: 5.1초로 TLS와 유사. preferred 모드에서도 서버 측 연결 수락 처리가 병목
-- **500+ conns에서 치명적 문제 발견**: Non-TLS 연결 성공률이 **1% → 0.9% → 0%**로 급락. 순수 Non-TLS 클러스터(94.6%)와 극명한 차이
-- **원인 분석**: preferred 모드에서 서버는 새 연결마다 TLS 핸드셰이크 시도 여부를 판별해야 함. 이 판별 과정에서 Non-TLS 연결이 TLS 연결보다 우선순위가 낮거나, 프로토콜 감지 타임아웃이 발생하는 것으로 추정
-- **결론**: preferred 모드는 소규모(10~50) 워크로드에서만 유효. 대규모 connection storm에서는 **순수 Non-TLS 클러스터보다 훨씬 나쁜 결과**를 보이므로 주의 필요
-
----
-
-### 개선방안 2: Connection Pool + Warm-up
-
-> 매번 새 ClusterClient를 생성하는 대신, 단일 ClusterClient를 미리 생성(warm-up)하고 모든 동시 요청이 공유. TLS 핸드셰이크는 초기 warm-up 시에만 발생하고, 이후 요청은 기존 연결을 재사용.
-
-**TLS Pool (r7g.large, 2 shard, required)**
-
-| 동시접속 | Wall Time | 성공 | 성공률 | 처리량 |
-|----------|-----------|------|--------|--------|
-| 10 | 130ms | 10/10 | 100% | 77 c/s |
-| 50 | 184ms | 50/50 | 100% | 272 c/s |
-| 100 | **292ms** | 100/100 | 100% | **342 c/s** |
-| 200 | 10.4s | 200/200 | 100% | 19 c/s |
-| 500 | 15.3s | 180/500 | 36% | 12 c/s |
-| 1,000 | 15.3s | 516/1000 | 51.6% | 34 c/s |
-| 2,000 | 15.1s | 722/2000 | 36.1% | 48 c/s |
-
-**Non-TLS Pool (r7g.large, 1 shard) — 참고용**
-
-| 동시접속 | Wall Time | 성공 | 성공률 | 처리량 |
-|----------|-----------|------|--------|--------|
-| 10 | 12ms | 10/10 | 100% | 833 c/s |
-| 50 | 15ms | 50/50 | 100% | 3,333 c/s |
-| 100 | 5.0s | 100/100 | 100% | 20 c/s |
-| 200 | 10.0s | 170/200 | 85% | 17 c/s |
-| 500 | 15.0s | 343/500 | 68.6% | 23 c/s |
-| 1,000 | 15.0s | 809/1000 | 80.9% | 54 c/s |
-| 2,000 | 15.0s | 1622/2000 | 81.1% | 108 c/s |
-
-**Pool vs Storm 비교 (TLS required, 2 shard)**
-
-| 동시접속 | Storm Wall Time | Pool Wall Time | 개선 배율 |
-|----------|----------------|----------------|-----------|
-| 10 | 129ms | 130ms | 1.0x (동일) |
-| 50 | 199ms | 184ms | 1.1x |
-| **100** | **5.3s** | **292ms** | **18.2x** |
-| 200 | 5.4s | 10.4s | 0.5x (악화) |
-| 500 | 15.3s (30.2%) | 15.3s (36%) | +5.8%p |
-
-**개선방안 2 인사이트:**
-
-- **100 동시접속에서 극적 개선**: 5.3s → 292ms (**18배 빠름**). 이 테스트에서 가장 큰 개선 효과
-- 개선 원리: Storm 모드에서는 100개의 독립 ClusterClient가 각각 모든 shard에 TLS 핸드셰이크를 수행 (100 × 2 shard × 2 노드 = 최대 400회 핸드셰이크). Pool 모드에서는 warm-up 시 1회만 핸드셰이크하고, 이후 100개 요청은 기존 연결을 재사용
-- 10~50 conns: Storm과 Pool의 차이가 거의 없음. 소규모에서는 핸드셰이크 횟수 자체가 적어 병목이 되지 않음
-- 200 conns: Pool이 오히려 느림 (10.4s vs 5.4s). 단일 ClusterClient의 내부 connection pool이 200개 동시 요청을 처리하면서 내부 lock contention 발생 추정
-- 500+ conns: 양쪽 모두 서버 측 한계로 타임아웃. Pool이 약간 나은 성공률 (36% vs 30.2%)
-- **결론**: Connection Pool은 **중규모(100~200) 동시접속에서 가장 효과적**. 대규모에서는 서버 측 한계가 지배적
-
----
-
-### 개선방안 4: Shard 수 증가 (2 → 4 shard)
-
-> 각 shard가 독립적으로 TLS 핸드셰이크를 처리하므로, shard를 늘리면 TLS 처리 용량이 수평 확장될 것이라는 가설 검증.
-
-**TLS Storm (r7g.large, 4 shard, required)**
-
-| 동시접속 | Wall Time | 성공 | 성공률 | 처리량 |
-|----------|-----------|------|--------|--------|
-| 10 | 354ms | 10/10 | 100% | 28 c/s |
-| 50 | 460ms | 50/50 | 100% | 109 c/s |
-| 100 | 5.5s | 100/100 | 100% | 18 c/s |
-| 200 | 15.1s | 76/200 | **38%** | 5 c/s |
-| 500 | 15.4s | 160/500 | 32% | 10 c/s |
-| 1,000 | 15.2s | 607/1000 | 60.7% | 40 c/s |
-| 2,000 | 15.0s | 519/2000 | 26% | 35 c/s |
-
-**TLS Pool (r7g.large, 4 shard, required)**
-
-| 동시접속 | Wall Time | 성공 | 성공률 | 처리량 |
-|----------|-----------|------|--------|--------|
-| 10 | 304ms | 10/10 | 100% | 33 c/s |
-| 50 | 425ms | 50/50 | 100% | 118 c/s |
-| 100 | 5.5s | 100/100 | 100% | 18 c/s |
-| 200 | 10.7s | 200/200 | 100% | 19 c/s |
-| 500 | 15.2s | 19/500 | **3.8%** | 1 c/s |
-| 1,000 | 15.2s | 366/1000 | 36.6% | 24 c/s |
-| 2,000 | 15.1s | 231/2000 | 11.6% | 15 c/s |
-
-**2 shard vs 4 shard 비교 (TLS Storm)**
-
-| 동시접속 | 2 shard | 4 shard | 변화 |
-|----------|---------|---------|------|
-| 10 | 129ms | 354ms | **2.7x 느려짐** |
-| 50 | 199ms | 460ms | **2.3x 느려짐** |
-| 100 | 5.3s, 100% | 5.5s, 100% | 유사 |
-| 200 | 5.4s, 100% | 15.1s, **38%** | **대폭 악화** |
-| 500 | 30.2% | 32% | 유사 |
-
-**개선방안 4 인사이트:**
-
-- **가설 기각**: Shard 증가가 connection storm 성능을 개선하지 않음. 오히려 악화
-- 소규모(10~50 conns): 4 shard가 2 shard보다 **2.3~2.7배 느림**. ClusterClient가 4개 shard × 2 노드(master+replica) = 8개 노드 모두에 TLS 연결을 맺어야 하므로 핸드셰이크 총 횟수가 2배 증가
-- 200 conns: 2 shard는 100% 성공하지만, 4 shard는 **38%만 성공**. 클라이언트당 연결 수가 4배(8노드)이므로 서버 측 TLS 처리 한계에 더 빨리 도달
-- 4 shard Pool 500 conns: **3.8% 성공**으로 최악의 결과. Pool 모드에서도 warm-up 시 8개 노드에 연결해야 하므로 초기 비용이 높음
-- **핵심 원인**: Cluster Mode에서 ClusterClient는 **모든 shard의 모든 노드에 연결**을 시도. shard 증가 = 노드 수 증가 = TLS 핸드셰이크 횟수 증가. 데이터 처리량 분산에는 효과적이지만, 연결 수립 성능에는 역효과
-
----
-
-## 종합 비교
-
-### 소규모 동시접속 (10~50) — Wall Time
+#### 소규모 동시접속 (10~50) — Wall Time
 
 | 시나리오 | 10 conns | 50 conns | 평가 |
 |----------|----------|----------|------|
@@ -229,7 +69,7 @@ Valkey/Redis 클러스터를 Non-TLS에서 TLS required로 전환하면, 모든 
 | TLS Pool 2 shard | 130ms | 184ms | TLS Storm과 유사 |
 | TLS Storm 4 shard | 354ms | 460ms | ❌ 가장 느림 |
 
-### 중규모 동시접속 (100) — 핵심 비교 포인트
+#### 중규모 동시접속 (100) — 핵심 비교 포인트
 
 | 시나리오 | Wall Time | 성공률 | 처리량 | 평가 |
 |----------|-----------|--------|--------|------|
@@ -239,7 +79,7 @@ Valkey/Redis 클러스터를 Non-TLS에서 TLS required로 전환하면, 모든 
 | preferred Non-TLS | 5.1s | 100% | 20 c/s | TLS Storm과 유사 |
 | TLS Storm 4 shard | 5.5s | 100% | 18 c/s | ❌ 개선 없음 |
 
-### 대규모 동시접속 (500+) — 성공률
+#### 대규모 동시접속 (500+) — 성공률
 
 | 시나리오 | 500 | 1,000 | 2,000 | 평가 |
 |----------|-----|-------|-------|------|
@@ -248,8 +88,6 @@ Valkey/Redis 클러스터를 Non-TLS에서 TLS required로 전환하면, 모든 
 | TLS Pool 2 shard | 36% | 51.6% | 36.1% | 약간 개선 |
 | preferred Non-TLS | **1%** | **0.9%** | **0%** | ❌ 최악 |
 | TLS Storm 4 shard | 32% | 60.7% | 26% | 개선 없음 |
-
----
 
 ## 결론
 
@@ -276,11 +114,9 @@ Valkey/Redis 클러스터를 Non-TLS에서 TLS required로 전환하면, 모든 
 **3순위: preferred 모드** (소규모 워크로드에 한정)
 - 10~50 동시접속 수준의 워크로드에서만 유효
 - 500+ 동시접속에서는 오히려 악화되므로 반드시 사전 테스트 필요
-- 보안 요건이 "TLS 지원" 수준이면 고려 가능
 
 **비권장: Shard 증가**
 - Connection storm 시나리오에서는 역효과
-- ClusterClient가 모든 shard에 연결하므로 shard 수 × 핸드셰이크 횟수 증가
 - 데이터 처리량 분산 목적으로만 사용
 
 ### 근본적 해결 방향
@@ -295,8 +131,6 @@ TLS 자체를 끄는 것이 아니라, **TLS 핸드셰이크 횟수를 최소화
 2. Staggered Reconnection: 동시 핸드셰이크 수를 시간 분산
 3. Envoy Sidecar: N개 앱 연결 → 소수 TLS 연결로 다중화
 ```
-
----
 
 ## 빌드 및 사용법
 
@@ -328,21 +162,6 @@ cargo build --release
 | `--timeout` | 15 | 연결 타임아웃 (초) |
 | `--label` | (자동) | 출력 라벨 |
 
-## 인프라 구성
-
-```bash
-# 클러스터 생성
-export SUBNET_GROUP="your-subnet-group"
-export SECURITY_GROUP="sg-xxxxxxxxx"
-./infra/create-clusters.sh
-
-# 전체 테스트 실행
-./scripts/run-tests.sh <nontls-ep>:6379 <tls-2shard-ep>:6379 <tls-4shard-ep>:6379
-
-# 정리
-./infra/cleanup-clusters.sh
-```
-
 ## Cascading Failure 재현 및 완화 테스트
 
 실제 장애 시나리오(HPA 스케일아웃 → TLS connection storm → 무한 재시도 → 메모리 폭주)를 재현하고, 완화 방안의 효과를 검증합니다.
@@ -358,27 +177,31 @@ export SECURITY_GROUP="sg-xxxxxxxxx"
 ./target/release/cascade --endpoint <host>:<port> --tls --pods 200 --retries 3 --backoff exponential
 ```
 
-### 결과 요약
+## 인프라 구성
 
-| 시나리오 | 총 시도 | 성공률 | 증폭 배율 | 서버 부하 |
-|----------|---------|--------|----------|----------|
-| 장애 재현 (500 pods, 10 retries, no backoff) | 1,170 | 100% | 2.3x | ❌ 최대 |
-| Fail fast (500 pods, no retry) | 500 | 9.2% | 1.0x | ⚠️ 1회성 |
-| 백오프 (500 pods, 3 retries, exp backoff) | 1,150 | 100% | 2.3x | ⚠️ 시간 분산 |
-| **HPA 제한 + 백오프 (200 pods, 3 retries)** | **403** | **100%** | **2.0x** | ✅ **65% 감소** |
+```bash
+# 클러스터 생성
+export SUBNET_GROUP="your-subnet-group"
+export SECURITY_GROUP="sg-xxxxxxxxx"
+./infra/create-clusters.sh
 
-상세 결과: [results/03-cascading-failure.md](results/03-cascading-failure.md)
+# 전체 테스트 실행
+./scripts/run-tests.sh <nontls-ep>:6379 <tls-2shard-ep>:6379 <tls-4shard-ep>:6379
+
+# 정리
+./infra/cleanup-clusters.sh
+```
 
 ## 프로젝트 구조
 
 ```
 valkey-tls-test/
-├── Cargo.toml                       # Rust 프로젝트 설정
+├── Cargo.toml
 ├── src/
 │   ├── main.rs                      # 벤치마크 도구 (storm/pool 모드)
 │   └── bin/cascade.rs               # Cascading failure 재현/완화 도구
 ├── infra/
-│   ├── create-clusters.sh           # ElastiCache 클러스터 생성 (Non-TLS, TLS 2/4 shard)
+│   ├── create-clusters.sh           # ElastiCache 클러스터 생성
 │   └── cleanup-clusters.sh          # 클러스터 정리
 ├── scripts/
 │   └── run-tests.sh                 # 전체 테스트 자동 실행
@@ -390,5 +213,215 @@ valkey-tls-test/
 ```
 
 ## 라이선스
+
+MIT
+
+---
+
+# English
+
+A benchmark project that quantitatively measures the performance impact of connection storms when transitioning from Non-TLS to TLS required on Amazon ElastiCache for Valkey 8.2, and validates the effectiveness of three mitigation strategies.
+
+## Background
+
+When transitioning a Valkey/Redis cluster from Non-TLS to TLS required, a TLS handshake is added to every client connection. While a single connection only adds tens to hundreds of milliseconds, during **connection storm** scenarios — where hundreds of connections are established simultaneously due to deployments or restarts — server-side TLS processing becomes a bottleneck, causing mass timeouts.
+
+This project validates:
+1. Quantitative impact of TLS transition on connection storm performance
+2. Effect of `transit-encryption-mode: preferred` transition
+3. Effect of Connection Pool + Warm-up
+4. Effect of increasing shard count (horizontal scaling)
+
+## Test Environment
+
+| Item | Specification |
+|------|---------------|
+| ElastiCache Engine | Valkey 8.2.0 |
+| Node Type | cache.r7g.large (2 vCPU, 13.07 GiB) |
+| Cluster Mode | Enabled |
+| Client EC2 | c7g.xlarge (ARM64, 4 vCPU, 8 GiB) |
+| Client Location | Same VPC Private Subnet (ap-northeast-2) |
+| Rust | 1.94.1 |
+| redis crate | 0.27 (cluster, tls-rustls) |
+| Timeout | 15 seconds |
+
+### Test Cluster Configuration
+
+| Cluster | Node Type | Shards | Config | TLS Mode |
+|---------|----------|--------|--------|----------|
+| valkey-nontls-test | r7g.large | 1 | 1M + 1R | Disabled |
+| stviztlwuv2jozz | r7g.large | 2 | 2M + 2R | required → preferred |
+| valkey-tls-4shard | r7g.large | 4 | 4M + 4R | required |
+
+### Test Modes
+
+| Mode | Behavior | Simulates |
+|------|----------|-----------|
+| `storm` | Creates new ClusterClient per concurrent connection → connect → PING | Connection storm during deployment/restart |
+| `pool` | Single ClusterClient warmed up and shared, concurrent get_connection() | Connection pool usage pattern |
+
+## Test Results
+
+See detailed results:
+- [01. Baseline: Non-TLS vs TLS](results/01-baseline.md)
+- [02. Mitigation Strategy Comparison](results/02-improvement-tests.md)
+- [03. Cascading Failure Reproduction/Mitigation](results/03-cascading-failure.md)
+
+### Overall Comparison
+
+#### Low Concurrency (10~50) — Wall Time
+
+| Scenario | 10 conns | 50 conns | Assessment |
+|----------|----------|----------|------------|
+| Non-TLS Storm (baseline) | 10ms | 16ms | Baseline |
+| TLS Storm 2 shard | 129ms | 199ms | 12~13x slower |
+| **preferred Non-TLS** | **22ms** | **26ms** | ✅ ~2x of baseline |
+| TLS Pool 2 shard | 130ms | 184ms | Similar to TLS Storm |
+| TLS Storm 4 shard | 354ms | 460ms | ❌ Slowest |
+
+#### Medium Concurrency (100) — Key Comparison
+
+| Scenario | Wall Time | Success Rate | Throughput | Assessment |
+|----------|-----------|-------------|------------|------------|
+| Non-TLS Storm | 19ms | 100% | 5,263 c/s | Baseline |
+| TLS Storm 2 shard | 5.3s | 100% | 19 c/s | 279x slower |
+| **TLS Pool 2 shard** | **292ms** | **100%** | **342 c/s** | ✅ **18x improvement** |
+| preferred Non-TLS | 5.1s | 100% | 20 c/s | Similar to TLS Storm |
+| TLS Storm 4 shard | 5.5s | 100% | 18 c/s | ❌ No improvement |
+
+#### High Concurrency (500+) — Success Rate
+
+| Scenario | 500 | 1,000 | 2,000 | Assessment |
+|----------|-----|-------|-------|------------|
+| Non-TLS Storm | 94.6% | 64.0% | 23.2% | Baseline |
+| TLS Storm 2 shard | 30.2% | 57.8% | 50.6% | |
+| TLS Pool 2 shard | 36% | 51.6% | 36.1% | Slight improvement |
+| preferred Non-TLS | **1%** | **0.9%** | **0%** | ❌ Worst |
+| TLS Storm 4 shard | 32% | 60.7% | 26% | No improvement |
+
+## Conclusions
+
+### Mitigation Effectiveness Matrix
+
+| Strategy | Low (10~50) | Medium (100) | High (500+) | Complexity | Overall |
+|----------|-------------|-------------|-------------|------------|---------|
+| ① preferred + Non-TLS | ✅ 6~8x faster | ⚠️ No effect | ❌ Severe degradation | Low (config change) | Limited |
+| ② Connection Pool | ⚠️ Same | ✅ **18x improvement** | ⚠️ Slight improvement | Medium (code change) | **Top priority** |
+| ④ More Shards | ❌ 2~3x worse | ❌ No effect | ⚠️ Similar | High (infra change) | Counterproductive |
+
+### Recommendations
+
+**Priority 1: Connection Pool + Warm-up** (Immediate)
+- 5.3s → 292ms at 100 concurrent connections (18x improvement)
+- Code-only change, no infrastructure modification needed
+- Pre-create ClusterClient at app startup, warm up connections before accepting traffic
+
+**Priority 2: Staggered Reconnection** (Architecture)
+- Apply jitter + exponential backoff so pods don't reconnect simultaneously during deployments
+- Include Valkey connection status in Kubernetes readiness probe
+- Adjust maxSurge/maxUnavailable during rolling updates to limit concurrent reconnections
+
+**Priority 3: preferred mode** (Small workloads only)
+- Only effective for 10~50 concurrent connection workloads
+- Degrades at 500+ concurrent connections — pre-testing required
+
+**Not Recommended: More Shards**
+- Counterproductive for connection storm scenarios
+- Use only for data throughput distribution
+
+### Fundamental Solution
+
+The key is not disabling TLS, but **minimizing the number of TLS handshakes**:
+
+```
+[Problem] During deployment: N pods × M shards × 2 nodes = N×M×2 simultaneous TLS handshakes
+
+[Solutions]
+1. Connection Pool: Limit handshakes to once at app startup → 18x improvement
+2. Staggered Reconnection: Distribute simultaneous handshakes over time
+3. Envoy Sidecar: Multiplex N app connections → few TLS connections
+```
+
+## Build & Usage
+
+```bash
+# Build (Rust 1.70+ required)
+cargo build --release
+
+# Non-TLS connection storm
+./target/release/valkey-conn-storm --endpoint <host>:<port> --mode storm
+
+# TLS connection storm
+./target/release/valkey-conn-storm --endpoint <host>:<port> --tls --mode storm
+
+# TLS connection pool (warm-up)
+./target/release/valkey-conn-storm --endpoint <host>:<port> --tls --mode pool
+
+# Custom label and timeout
+./target/release/valkey-conn-storm --endpoint <host>:<port> --tls --mode pool \
+  --timeout 30 --label "TLS Pool r7g.2xlarge 4 shard"
+```
+
+### CLI Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--endpoint` | (required) | Valkey cluster configuration endpoint (host:port) |
+| `--tls` | false | Use TLS connection |
+| `--mode` | storm | `storm` (new client) or `pool` (shared client) |
+| `--timeout` | 15 | Connection timeout (seconds) |
+| `--label` | (auto) | Output label |
+
+## Cascading Failure Reproduction & Mitigation
+
+Reproduces real failure scenarios (HPA scale-out → TLS connection storm → infinite retry → memory explosion) and validates mitigation effectiveness.
+
+```bash
+# Reproduce failure: 500 pods, 10 retries, no backoff
+./target/release/cascade --endpoint <host>:<port> --tls --pods 500 --retries 10 --backoff none
+
+# Mitigate: exponential backoff + retry limit
+./target/release/cascade --endpoint <host>:<port> --tls --pods 500 --retries 3 --backoff exponential
+
+# Mitigate: HPA rate limit + backoff
+./target/release/cascade --endpoint <host>:<port> --tls --pods 200 --retries 3 --backoff exponential
+```
+
+## Infrastructure Setup
+
+```bash
+# Create clusters
+export SUBNET_GROUP="your-subnet-group"
+export SECURITY_GROUP="sg-xxxxxxxxx"
+./infra/create-clusters.sh
+
+# Run all tests
+./scripts/run-tests.sh <nontls-ep>:6379 <tls-2shard-ep>:6379 <tls-4shard-ep>:6379
+
+# Cleanup
+./infra/cleanup-clusters.sh
+```
+
+## Project Structure
+
+```
+valkey-tls-test/
+├── Cargo.toml
+├── src/
+│   ├── main.rs                      # Benchmark tool (storm/pool modes)
+│   └── bin/cascade.rs               # Cascading failure reproduction/mitigation tool
+├── infra/
+│   ├── create-clusters.sh           # ElastiCache cluster creation
+│   └── cleanup-clusters.sh          # Cluster cleanup
+├── scripts/
+│   └── run-tests.sh                 # Full test automation
+├── results/
+│   ├── 01-baseline.md               # Non-TLS vs TLS baseline results
+│   ├── 02-improvement-tests.md      # Mitigation strategy comparison results
+│   └── 03-cascading-failure.md      # Cascading failure reproduction/mitigation results
+└── userdata.sh                      # EC2 test instance user-data
+```
+
+## License
 
 MIT

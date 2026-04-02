@@ -1,3 +1,13 @@
+<div align="center">
+
+🇰🇷 [한국어](#한국어) | 🇺🇸 [English](#english)
+
+</div>
+
+---
+
+# 한국어
+
 # Cascading Failure 재현 및 완화 테스트
 
 > 테스트 일시: 2026-04-02 01:07 UTC
@@ -181,3 +191,191 @@ Amplification: 2.0x
 | 3 | HPA `scaleUp.policies.value=5` (한 번에 5개만) | 동시 연결 수 제한 | YAML 변경 |
 | 4 | Readiness probe에 Valkey 연결 포함 | 미연결 Pod 트래픽 차단 | YAML 변경 |
 | 5 | CloudWatch 알람: NewConnections > 1000/min | 조기 감지 | 설정 |
+
+---
+
+# English
+
+# Cascading Failure Reproduction & Mitigation Test
+
+> Test Date: 2026-04-02 01:07 UTC
+> Target Cluster: stviztlwuv2jozz (r7g.large, 2 shard, TLS preferred)
+> Client: c7g.xlarge, Same VPC
+
+## Background: Real Failure Scenario
+
+```
+Frontend Pod failure → HPA scale-out → Mass Pod creation
+→ CPU count per Pod × simultaneous TLS connections
+→ Valkey TLS handshake limit exceeded → Timeouts
+→ App infinite retry (no backoff) → Connection attempts accumulate
+→ Half-completed TLS session memory accumulates → Memory 100% → Node unresponsive
+→ Failover → Failover target hit by same storm → Failure persists
+```
+
+## Test Scenarios
+
+| Scenario | Pods | Retries | Backoff | Simulates |
+|----------|------|---------|---------|-----------|
+| 1. REPRODUCE | 500 | 10 | None | Failure reproduction (infinite retry, no backoff) |
+| 2. FIX-A | 500 | 0 | - | No retry (fail fast) |
+| 3. FIX-B | 500 | 3 | Exponential+jitter | Proper retry pattern |
+| 4. FIX-C | 200 | 3 | Exponential+jitter | HPA rate limit + proper retry |
+
+---
+
+## Results
+
+### Scenario 1: Failure Reproduction (500 pods, 10 retries, no backoff)
+
+```
+  [  5s] attempts=501  ok=67   fail=1
+  [ 10s] attempts=933  ok=292  fail=433
+  [ 15s] attempts=1129 ok=467  fail=629
+  [ 20s] attempts=1162 ok=492  fail=662
+
+Total attempts: 1,170
+Success: 500 (100%), Fail: 670
+Amplification: 2.3x
+```
+
+- 500 pods made **1,170 total** connection attempts (2.3x amplification)
+- At 5s: 501 attempts with only 67 successes (13.4%) — remaining 434 queued for retry
+- 670 failed TLS handshakes put load on server memory
+- In production, unlimited retries would cause much higher amplification
+
+### Scenario 2: No Retry (500 pods, fail fast)
+
+```
+  [  5s] attempts=500  ok=46   fail=2
+
+Total attempts: 500
+Success: 46 (9.2%), Fail: 454
+Amplification: 1.0x
+```
+
+- Exactly 500 attempts (no amplification)
+- 9.2% success rate is very low, but **no additional server load**
+- Test completes in 5 seconds — server gets recovery time
+- Failed pods are rescheduled by Kubernetes, naturally distributing over time
+
+### Scenario 3: Exponential Backoff Retry (500 pods, 3 retries, exponential backoff)
+
+```
+  [  5s] attempts=500  ok=28   fail=8
+  [ 10s] attempts=972  ok=295  fail=472
+  [ 15s] attempts=1140 ok=483  fail=650
+
+Total attempts: 1,150
+Success: 500 (100%), Fail: 650
+Amplification: 2.3x
+```
+
+- Total attempts similar to Scenario 1 (1,150 vs 1,170)
+- Key difference: **time distribution**. At 5s: 500 attempts (Scenario 1 also 501)
+- Backoff distributes retries over time → reduced instantaneous server load
+- Final 100% success — all pods connected
+
+### Scenario 4: HPA Limit + Backoff (200 pods, 3 retries, exponential backoff)
+
+```
+  [  5s] attempts=200  ok=14   fail=8
+  [ 10s] attempts=386  ok=183  fail=186
+  [ 15s] attempts=403  ok=198  fail=203
+
+Total attempts: 403
+Success: 200 (100%), Fail: 203
+Amplification: 2.0x
+```
+
+- Total 403 attempts (1/3 of Scenario 1)
+- At 5s: 200 attempts (40% of Scenario 1)
+- Nearly all pods connected within 15 seconds
+- **Lowest server load** — minimal cascading failure risk
+
+---
+
+## Comparative Analysis
+
+### Server Load Comparison (at 5 seconds)
+
+| Scenario | Attempts at 5s | Failures at 5s | Server Load |
+|----------|---------------|----------------|-------------|
+| 1. REPRODUCE | 501 | 434 | ❌ Maximum |
+| 2. FIX-A (no retry) | 500 | 454 | ⚠️ High but one-time |
+| 3. FIX-B (backoff) | 500 | 472 | ⚠️ Same initially, distributed later |
+| 4. FIX-C (HPA+backoff) | 200 | 186 | ✅ **60% reduction** |
+
+### Total Connection Attempts (Cumulative Server Load)
+
+| Scenario | Total Attempts | Total Failures | Amplification | Completion Time |
+|----------|---------------|----------------|---------------|-----------------|
+| 1. REPRODUCE | 1,170 | 670 | 2.3x | ~20s |
+| 2. FIX-A | 500 | 454 | 1.0x | ~5s |
+| 3. FIX-B | 1,150 | 650 | 2.3x | ~15s |
+| 4. FIX-C | 403 | 203 | 2.0x | ~15s |
+
+### Final Success Rate
+
+| Scenario | Success | Rate |
+|----------|---------|------|
+| 1. REPRODUCE | 500/500 | 100% (but 670 failed attempts) |
+| 2. FIX-A | 46/500 | **9.2%** (fail fast) |
+| 3. FIX-B | 500/500 | **100%** |
+| 4. FIX-C | 200/200 | **100%** |
+
+---
+
+## Key Insights
+
+### 1. Danger of Infinite Retries
+
+In Scenario 1, 500 pods made 1,170 attempts (2.3x amplification). In production:
+- Unlimited retries → 10x~100x amplification
+- Each failed TLS handshake consumes server memory
+- Faster retries increase server load → vicious cycle
+
+### 2. Fail Fast (Scenario 2) Protects the Server
+
+Despite 9.2% success rate:
+- No additional server load (1.0x amplification)
+- Completes in 5 seconds → server gets recovery time
+- Kubernetes reschedules failed pods, naturally distributing over time
+- **Keeping the server alive is the top priority** — if the server dies, all pods fail
+
+### 3. Exponential Backoff Effect
+
+Scenario 3 has similar total attempts to Scenario 1, but:
+- Retries distributed over time reduce instantaneous load
+- Server gets breathing room to recover
+- Final 100% success
+
+### 4. HPA Rate Limiting is Most Effective
+
+Scenario 4 (200 pods + backoff):
+- Total 403 attempts (**1/3 of Scenario 1**)
+- 60% server load reduction
+- 100% success
+- **Reducing concurrent pod count is the most direct server protection**
+
+---
+
+## Differences from Real Failures
+
+This test was performed on r7g.large 2 shard. Differences from real failure environments:
+- Real: Unlimited retries → much higher amplification (10x~100x)
+- Real: Connections per Python process → CPU count × Pod count = more concurrent connections
+- Real: Prolonged duration → half-completed TLS session memory accumulation → OOM
+- This test: 60-second limit prevented reaching OOM
+
+---
+
+## Recommended Actions (Priority Order)
+
+| Priority | Action | Effect | Difficulty |
+|----------|--------|--------|------------|
+| 1 | `retry_on_timeout=False` + 3 retry limit + exponential backoff | Prevent amplification | 1 line of code |
+| 2 | Circuit breaker (block 30s after 5 consecutive failures) | Server protection | Code change |
+| 3 | HPA `scaleUp.policies.value=5` (5 pods at a time) | Limit concurrent connections | YAML change |
+| 4 | Include Valkey connection in readiness probe | Block traffic to unconnected pods | YAML change |
+| 5 | CloudWatch alarm: NewConnections > 1000/min | Early detection | Configuration |

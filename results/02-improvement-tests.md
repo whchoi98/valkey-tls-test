@@ -1,3 +1,13 @@
+<div align="center">
+
+🇰🇷 [한국어](#한국어) | 🇺🇸 [English](#english)
+
+</div>
+
+---
+
+# 한국어
+
 # 개선방안 비교 테스트 결과
 
 > 테스트 일시: 2026-04-01 23:25~23:42 UTC
@@ -297,4 +307,309 @@ TLS 자체를 끄는 것이 아니라, **TLS 핸드셰이크 횟수를 최소화
 1. Connection Pool: 핸드셰이크를 앱 시작 시 1회로 제한 → 18x 개선
 2. Staggered Reconnection: 동시 핸드셰이크 수를 시간 분산
 3. Envoy Sidecar: N개 앱 연결 → 소수 TLS 연결로 다중화
+```
+
+---
+
+# English
+
+# Mitigation Strategy Comparison Test Results
+
+> Test Date: 2026-04-01 23:25~23:42 UTC
+> Purpose: Validate effectiveness of three strategies for TLS connection storm performance improvement
+
+## Test Infrastructure
+
+| Cluster | Instance | Shards | Config | TLS Mode | Purpose |
+|---------|----------|--------|--------|----------|---------|
+| valkey-nontls-test | r7g.large | 1 | 1M+1R | Disabled | Baseline |
+| stviztlwuv2jozz | r7g.large | 2 | 2M+2R | required → preferred | Test 1, 2 |
+| valkey-tls-4shard | r7g.large | 4 | 4M+4R | required | Test 4 |
+
+Client: c7g.xlarge (ARM64, 4 vCPU), Same VPC Private Subnet, Timeout 15s
+
+---
+
+## Baseline (from previous test)
+
+| Concurrency | Non-TLS Storm (1 shard) | TLS Storm (2 shard, required) |
+|-------------|------------------------|------------------------------|
+| 10 | 10ms, 100% | 129ms, 100% |
+| 50 | 16ms, 100% | 199ms, 100% |
+| 100 | 19ms, 100% | 5.3s, 100% |
+| 200 | 5.0s, 100% | 5.4s, 100% |
+| 500 | 10.0s, 94.6% | 15.3s, 30.2% |
+| 1,000 | 15.0s, 64.0% | 15.3s, 57.8% |
+| 2,000 | 15.0s, 23.2% | 15.1s, 50.6% |
+
+---
+
+## Test 1: transit-encryption-mode preferred
+
+### Overview
+
+Online transition of TLS cluster from `required` → `preferred`. In preferred mode, the same port (6379) accepts both TLS and Non-TLS connections. Strategy: use Non-TLS for performance-critical internal traffic to avoid TLS overhead.
+
+Transition command:
+```bash
+aws elasticache modify-replication-group \
+  --replication-group-id stviztlwuv2jozz \
+  --transit-encryption-mode preferred \
+  --apply-immediately
+```
+
+Transition time: ~10 minutes (no downtime)
+
+### preferred mode — Non-TLS connections (storm)
+
+| Concurrency | Wall Time | Success | Rate | Throughput |
+|-------------|-----------|---------|------|------------|
+| 10 | 22ms | 10/10 | 100% | 455 c/s |
+| 50 | 26ms | 50/50 | 100% | 1,923 c/s |
+| 100 | 5.1s | 100/100 | 100% | 20 c/s |
+| 200 | 10.1s | 180/200 | 90% | 18 c/s |
+| 500 | 15.0s | 5/500 | **1%** | 0 c/s |
+| 1,000 | 15.0s | 9/1000 | **0.9%** | 1 c/s |
+| 2,000 | 15.0s | 0/2000 | **0%** | 0 c/s |
+
+### preferred mode — TLS connections (storm, same cluster)
+
+| Concurrency | Wall Time | Success | Rate | Throughput |
+|-------------|-----------|---------|------|------------|
+| 10 | 137ms | 10/10 | 100% | 73 c/s |
+| 50 | 218ms | 50/50 | 100% | 229 c/s |
+| 100 | 5.3s | 100/100 | 100% | 19 c/s |
+| 200 | 5.4s | 200/200 | 100% | 37 c/s |
+| 500 | 15.2s | 69/500 | 13.8% | 5 c/s |
+| 1,000 | 15.0s | 541/1000 | 54.1% | 36 c/s |
+| 2,000 | 15.0s | 1007/2000 | 50.4% | 67 c/s |
+
+### Insights
+
+**Low concurrency (10~50 conns) — Effective:**
+- Non-TLS connections at 22ms / 26ms, close to pure Non-TLS cluster (10ms / 16ms)
+- **6~8x faster** than TLS connections (137ms / 218ms)
+- Non-TLS connections completely skip TLS handshake even in preferred mode
+
+**100 conns — No effect:**
+- Non-TLS connections also take 5.1s (same level as TLS Storm)
+- Server's protocol detection process itself becomes the bottleneck in preferred mode
+
+**500+ conns — Critical degradation:**
+- Non-TLS success rate: 1% → 0.9% → **0%**
+- Stark contrast with pure Non-TLS cluster (94.6%)
+- Much worse than TLS connections (13.8% → 54.1% → 50.4%)
+
+**Root cause:**
+- In preferred mode, server reads first byte of each new connection to determine if it's a TLS ClientHello
+- During mass concurrent connections, this detection serializes, trapping Non-TLS connections in queue
+- TLS connections send ClientHello immediately for fast detection, but Non-TLS connections delay sending RESP protocol data
+
+**Conclusion:** preferred mode is only effective for small (10~50) workloads. For large connection storms, results are much worse than pure Non-TLS clusters — pre-testing is essential.
+
+---
+
+## Test 2: Connection Pool + Warm-up
+
+### Overview
+
+Instead of creating a new ClusterClient each time, pre-create a single ClusterClient (warm-up) shared by all concurrent requests. TLS handshakes only occur during initial warm-up; subsequent requests reuse existing connections.
+
+```
+[Storm mode]  100 conns × 2 shards × 2 nodes = up to 400 TLS handshakes
+[Pool mode]   warm-up 1 time × 2 shards × 2 nodes = 4 TLS handshakes
+```
+
+### TLS Pool (r7g.large, 2 shard, required)
+
+| Concurrency | Wall Time | Success | Rate | Throughput |
+|-------------|-----------|---------|------|------------|
+| 10 | 130ms | 10/10 | 100% | 77 c/s |
+| 50 | 184ms | 50/50 | 100% | 272 c/s |
+| 100 | **292ms** | 100/100 | 100% | **342 c/s** |
+| 200 | 10.4s | 200/200 | 100% | 19 c/s |
+| 500 | 15.3s | 180/500 | 36% | 12 c/s |
+| 1,000 | 15.3s | 516/1000 | 51.6% | 34 c/s |
+| 2,000 | 15.1s | 722/2000 | 36.1% | 48 c/s |
+
+### Non-TLS Pool (r7g.large, 1 shard) — Reference
+
+| Concurrency | Wall Time | Success | Rate | Throughput |
+|-------------|-----------|---------|------|------------|
+| 10 | 12ms | 10/10 | 100% | 833 c/s |
+| 50 | 15ms | 50/50 | 100% | 3,333 c/s |
+| 100 | 5.0s | 100/100 | 100% | 20 c/s |
+| 200 | 10.0s | 170/200 | 85% | 17 c/s |
+| 500 | 15.0s | 343/500 | 68.6% | 23 c/s |
+| 1,000 | 15.0s | 809/1000 | 80.9% | 54 c/s |
+| 2,000 | 15.0s | 1622/2000 | 81.1% | 108 c/s |
+
+### Pool vs Storm Comparison (TLS required, 2 shard)
+
+| Concurrency | Storm | Pool | Improvement |
+|-------------|-------|------|-------------|
+| 10 | 129ms, 100% | 130ms, 100% | Same |
+| 50 | 199ms, 100% | 184ms, 100% | 1.1x |
+| **100** | **5.3s, 100%** | **292ms, 100%** | **18.2x** |
+| 200 | 5.4s, 100% | 10.4s, 100% | 0.5x (worse) |
+| 500 | 30.2% | 36% | +5.8%p |
+| 1,000 | 57.8% | 51.6% | -6.2%p |
+| 2,000 | 50.6% | 36.1% | -14.5%p |
+
+### Insights
+
+**100 conns — Dramatic improvement (highlight of this test):**
+- Storm 5.3s → Pool 292ms (**18x faster**)
+- Storm: 100 independent ClusterClients × 4 nodes = up to 400 TLS handshakes
+- Pool: 4 handshakes during warm-up, then 100 requests reuse existing connections
+- Throughput: 19 c/s → 342 c/s (18x improvement)
+
+**10~50 conns — No difference:**
+- At small scale, total handshake count is low enough not to be a bottleneck
+- Pool warm-up overhead is similar to Storm handshake cost
+
+**200 conns — Pool is actually slower:**
+- Pool 10.4s vs Storm 5.4s
+- Single ClusterClient's internal connection pool experiences lock contention with 200 concurrent requests
+- redis crate's ClusterClient manages per-slot connections internally, causing mutex contention under concurrent access
+
+**500+ conns — Server limits dominate:**
+- Both sides timeout due to server-side limits
+- Pool has slightly better success rate (36% vs 30.2%) — reduced handshake load
+- At 2,000 conns, Pool is lower (36.1% vs 50.6%) — single client internal contention
+
+**Conclusion:** Connection Pool is **most effective at medium concurrency (100~200)**. At high scale, server-side limits dominate, and single client internal contention can become an additional bottleneck.
+
+---
+
+## Test 4: Increasing Shard Count (2 → 4 shards)
+
+### Overview
+
+Hypothesis: since each shard processes TLS handshakes independently, increasing shards should horizontally scale TLS processing capacity.
+
+```
+[2 shard] ClusterClient → 4 nodes (2M + 2R) TLS connections
+[4 shard] ClusterClient → 8 nodes (4M + 4R) TLS connections  ← 2x handshakes
+```
+
+### TLS Storm (r7g.large, 4 shard, required)
+
+| Concurrency | Wall Time | Success | Rate | Throughput |
+|-------------|-----------|---------|------|------------|
+| 10 | 354ms | 10/10 | 100% | 28 c/s |
+| 50 | 460ms | 50/50 | 100% | 109 c/s |
+| 100 | 5.5s | 100/100 | 100% | 18 c/s |
+| 200 | 15.1s | 76/200 | **38%** | 5 c/s |
+| 500 | 15.4s | 160/500 | 32% | 10 c/s |
+| 1,000 | 15.2s | 607/1000 | 60.7% | 40 c/s |
+| 2,000 | 15.0s | 519/2000 | 26% | 35 c/s |
+
+### TLS Pool (r7g.large, 4 shard, required)
+
+| Concurrency | Wall Time | Success | Rate | Throughput |
+|-------------|-----------|---------|------|------------|
+| 10 | 304ms | 10/10 | 100% | 33 c/s |
+| 50 | 425ms | 50/50 | 100% | 118 c/s |
+| 100 | 5.5s | 100/100 | 100% | 18 c/s |
+| 200 | 10.7s | 200/200 | 100% | 19 c/s |
+| 500 | 15.2s | 19/500 | **3.8%** | 1 c/s |
+| 1,000 | 15.2s | 366/1000 | 36.6% | 24 c/s |
+| 2,000 | 15.1s | 231/2000 | 11.6% | 15 c/s |
+
+### 2 shard vs 4 shard Comparison (TLS Storm)
+
+| Concurrency | 2 shard | 4 shard | Change |
+|-------------|---------|---------|--------|
+| 10 | 129ms, 100% | 354ms, 100% | **2.7x slower** |
+| 50 | 199ms, 100% | 460ms, 100% | **2.3x slower** |
+| 100 | 5.3s, 100% | 5.5s, 100% | Similar |
+| 200 | 5.4s, 100% | 15.1s, 38% | **Significantly worse** |
+| 500 | 30.2% | 32% | Similar |
+| 1,000 | 57.8% | 60.7% | Similar |
+| 2,000 | 50.6% | 26% | **Worse** |
+
+### Insights
+
+**Hypothesis rejected — More shards are counterproductive for connection storms:**
+
+**Low concurrency (10~50 conns) — 2.3~2.7x slower:**
+- 4 shard: ClusterClient connects to all 8 nodes → 2x total handshakes
+- 10 conns: 10 × 8 nodes = 80 handshakes (2 shard: 10 × 4 = 40)
+- Pure handshake cost increases proportionally
+
+**200 conns — 2 shard 100% vs 4 shard 38%:**
+- 2 shard: 200 × 4 nodes = 800 handshakes → 4 servers handle 200 each
+- 4 shard: 200 × 8 nodes = 1,600 handshakes → 8 servers handle 200 each
+- Server count doubles but total handshakes also double → no net gain
+- Client-side resource contention increases from connecting to 8 nodes simultaneously
+
+**4 shard Pool 500 conns — 3.8% success (worst):**
+- Even in Pool mode, warm-up requires connecting to 8 nodes → higher initial cost
+- 500 concurrent requests through single ClusterClient distributed across 8 nodes maximizes internal contention
+
+**Root cause:**
+- In Cluster Mode, ClusterClient **connects to all nodes across all shards**
+- More shards = more nodes = more TLS handshakes per client
+- Server-side TLS capacity is independent per shard, but client-side load increases proportionally, negating the benefit
+
+**Conclusion:** More shards are effective for data throughput distribution but counterproductive for connection storms. Not recommended for TLS connection establishment performance.
+
+---
+
+## Overall Comparison
+
+### Low Concurrency (10~50) — Wall Time
+
+| Scenario | 10 conns | 50 conns | Assessment |
+|----------|----------|----------|------------|
+| Non-TLS Storm (baseline) | 10ms | 16ms | Baseline |
+| TLS Storm 2 shard | 129ms | 199ms | 12~13x slower |
+| **preferred Non-TLS** | **22ms** | **26ms** | ✅ ~2x of baseline |
+| TLS Pool 2 shard | 130ms | 184ms | Similar to TLS Storm |
+| TLS Storm 4 shard | 354ms | 460ms | ❌ Slowest |
+
+### Medium Concurrency (100) — Key Comparison
+
+| Scenario | Wall Time | Success Rate | Throughput | Assessment |
+|----------|-----------|-------------|------------|------------|
+| Non-TLS Storm | 19ms | 100% | 5,263 c/s | Baseline |
+| TLS Storm 2 shard | 5.3s | 100% | 19 c/s | 279x slower |
+| **TLS Pool 2 shard** | **292ms** | **100%** | **342 c/s** | ✅ **18x improvement** |
+| preferred Non-TLS | 5.1s | 100% | 20 c/s | No effect |
+| TLS Storm 4 shard | 5.5s | 100% | 18 c/s | ❌ No effect |
+
+### High Concurrency (500+) — Success Rate
+
+| Scenario | 500 | 1,000 | 2,000 | Assessment |
+|----------|-----|-------|-------|------------|
+| Non-TLS Storm | 94.6% | 64.0% | 23.2% | Baseline |
+| TLS Storm 2 shard | 30.2% | 57.8% | 50.6% | |
+| TLS Pool 2 shard | 36% | 51.6% | 36.1% | Slight improvement |
+| preferred Non-TLS | **1%** | **0.9%** | **0%** | ❌ Worst |
+| TLS Storm 4 shard | 32% | 60.7% | 26% | No improvement |
+
+---
+
+## Final Conclusions
+
+### Mitigation Effectiveness Matrix
+
+| Strategy | Low (10~50) | Medium (100) | High (500+) | Complexity | Overall |
+|----------|-------------|-------------|-------------|------------|---------|
+| ① preferred + Non-TLS | ✅ 6~8x faster | ⚠️ No effect | ❌ Severe degradation | Low | Limited |
+| ② Connection Pool | ⚠️ Same | ✅ **18x improvement** | ⚠️ Slight improvement | Medium | **Top priority** |
+| ④ More Shards | ❌ 2~3x worse | ❌ No effect | ⚠️ Similar | High | Counterproductive |
+
+### Key Message
+
+The key is not disabling TLS, but **minimizing the number of TLS handshakes**:
+
+```
+[Problem] During deployment: N pods × M shards × 2 nodes = N×M×2 simultaneous TLS handshakes
+
+[Solutions]
+1. Connection Pool: Limit handshakes to once at app startup → 18x improvement
+2. Staggered Reconnection: Distribute simultaneous handshakes over time
+3. Envoy Sidecar: Multiplex N app connections → few TLS connections
 ```
