@@ -1,3 +1,13 @@
+<div align="center">
+
+🇰🇷 [한국어](#한국어) | 🇺🇸 [English](#english)
+
+</div>
+
+---
+
+# 한국어
+
 # Redis OSS 7.2 Self-hosted TLS Connection Storm 테스트 결과
 
 ## 테스트 환경
@@ -114,6 +124,131 @@
 
 | 리소스 | ID | IP |
 |--------|----|----|
+| server-1 (Non-TLS) | i-083ea03e8a15bb568 | 10.11.62.234 |
+| server-2 (TLS shard) | i-0922dfe836d701437 | 10.11.35.38 |
+| server-3 (TLS shard) | i-0b4afd836fb0046ab | 10.11.88.49 |
+| Security Group | sg-010a561677d490581 | - |
+
+---
+
+# English
+
+# Redis OSS 7.2 Self-hosted TLS Connection Storm Test Results
+
+## Test Environment
+
+| Item | Specification |
+|------|---------------|
+| Engine | Redis OSS 7.2.7 (BUILD_TLS=yes) |
+| Server Instance | r7g.large (2 vCPU, 16 GiB) × 3 |
+| Client Instance | c7g.xlarge (4 vCPU, 8 GiB) |
+| Network | Same VPC Private Subnet (ap-northeast-2) |
+| TLS | Self-signed CA, tls-auth-clients no |
+| redis crate | 0.27 (cluster, tls-rustls, tls-rustls-insecure) |
+| Timeout | 15 seconds |
+
+### Cluster Configuration
+
+| Cluster | Nodes | Hosts | TLS |
+|---------|-------|-------|-----|
+| Non-TLS | 3M + 3R | 1 host (10.11.62.234) | Disabled |
+| TLS | 3M + 3R | 2 hosts (10.11.35.38, 10.11.88.49) | Enabled |
+
+## Test Results
+
+### Non-TLS Storm
+
+| Conns | Wall Time | Success Rate | Throughput |
+|-------|-----------|-------------|------------|
+| 10 | 16ms | 100% | 625 c/s |
+| 50 | 89ms | 100% | 562 c/s |
+| 100 | 60ms | 100% | 1,667 c/s |
+| 200 | 101ms | 100% | 1,980 c/s |
+| 500 | 153ms | 100% | 3,268 c/s |
+| 1,000 | 229ms | 100% | 4,367 c/s |
+| 2,000 | 415ms | 100% | 4,819 c/s |
+
+### TLS Storm
+
+| Conns | Wall Time | Success Rate | Throughput |
+|-------|-----------|-------------|------------|
+| 10 | 113ms | 100% | 88 c/s |
+| 50 | 708ms | 100% | 71 c/s |
+| 100 | 919ms | 100% | 109 c/s |
+| 200 | 2.0s | 100% | 98 c/s |
+| 500 | 4.8s | 100% | 105 c/s |
+| 1,000 | 8.7s | 100% | 115 c/s |
+| 2,000 | 15.1s | 77% | 102 c/s |
+
+### TLS Pool
+
+| Conns | Wall Time | Success Rate | Throughput |
+|-------|-----------|-------------|------------|
+| 10 | 111ms | 100% | 90 c/s |
+| 50 | 452ms | 100% | 111 c/s |
+| 100 | 916ms | 100% | 109 c/s |
+| 200 | 1.8s | 100% | 110 c/s |
+| 500 | 4.4s | 100% | 114 c/s |
+| 1,000 | 8.7s | 100% | 114 c/s |
+| 2,000 | 15.1s | 77% | 102 c/s |
+
+## ElastiCache Valkey 8.2 vs Redis OSS 7.2 Comparison
+
+### 100 Concurrent Connections (Key Comparison)
+
+| Scenario | ElastiCache Valkey | Redis OSS | Comparison |
+|----------|-------------------|-----------|------------|
+| Non-TLS Storm | 19ms, 100%, 5,263 c/s | 60ms, 100%, 1,667 c/s | Valkey 3x faster |
+| TLS Storm | 5.3s, 100%, 19 c/s | 919ms, 100%, 109 c/s | **Redis OSS 5.8x faster** |
+| TLS Pool | 292ms, 100%, 342 c/s | 916ms, 100%, 109 c/s | Valkey Pool 3x faster |
+
+### 500 Concurrent Connections
+
+| Scenario | ElastiCache Valkey | Redis OSS | Comparison |
+|----------|-------------------|-----------|------------|
+| Non-TLS Storm | 94.6% success | 100%, 3,268 c/s | Redis OSS better |
+| TLS Storm | 30.2% success | 100%, 105 c/s | **Redis OSS success rate better** |
+| TLS Pool | 36% success | 100%, 114 c/s | **Redis OSS success rate better** |
+
+### 2,000 Concurrent Connections
+
+| Scenario | ElastiCache Valkey | Redis OSS |
+|----------|-------------------|-----------|
+| Non-TLS Storm | 23.2% success | 100% |
+| TLS Storm | 50.6% success | 77% |
+| TLS Pool | 36.1% success | 77% |
+
+## Analysis
+
+### 1. TLS Overhead Occurs Equally on Redis OSS
+
+- Non-TLS → TLS transition causes **7~15x performance degradation** (Wall Time)
+- 100 conns: 60ms → 919ms (15x)
+- Less severe than ElastiCache Valkey's 19ms → 5.3s (279x), but TLS handshake bottleneck is identical
+
+### 2. Why Self-hosted Redis OSS is Faster for TLS Storm
+
+- ElastiCache has a proxy layer (configuration endpoint) adding extra latency
+- Self-hosted connects directly to nodes without proxy overhead
+- However, self-hosted requires operational burden (HA, patching, monitoring)
+
+### 3. Connection Pool Effect is Minimal on Self-hosted
+
+- ElastiCache: Storm 5.3s → Pool 292ms (18x improvement)
+- Redis OSS: Storm 919ms → Pool 916ms (**no improvement**)
+- Reason: On self-hosted clusters, each `get_connection()` still triggers new TLS handshakes
+
+### 4. Conclusion
+
+**TLS connection storm issues occur equally on Redis OSS.**
+- Root cause is TLS handshake CPU cost, not engine differences (Valkey vs Redis)
+- ElastiCache proxy layer creates additional bottleneck, but fundamental cause is the same
+- Mitigation strategies (Connection Pool, Staggered Reconnection) are needed for both
+
+## Infrastructure Info
+
+| Resource | ID | IP |
+|----------|----|----|
 | server-1 (Non-TLS) | i-083ea03e8a15bb568 | 10.11.62.234 |
 | server-2 (TLS shard) | i-0922dfe836d701437 | 10.11.35.38 |
 | server-3 (TLS shard) | i-0b4afd836fb0046ab | 10.11.88.49 |

@@ -1,3 +1,13 @@
+<div align="center">
+
+🇰🇷 [한국어](#한국어) | 🇺🇸 [English](#english)
+
+</div>
+
+---
+
+# 한국어
+
 # TLS Connection Storm 통합 벤치마크 보고서
 
 > 테스트 기간: 2026-04-01 ~ 2026-04-08
@@ -464,3 +474,445 @@ Amplification: 2.0x
 | Valkey-SG | sg-0a3c3d2faec77dc0b | ElastiCache 클러스터 |
 | valkey-test-ec2-sg | sg-0a7cdb6f09726515d | 클라이언트 EC2 |
 | redis-oss-test-sg | sg-010a561677d490581 | Redis OSS 서버 EC2 |
+
+---
+
+# English
+
+# TLS Connection Storm Consolidated Benchmark Report
+
+> Test Period: 2026-04-01 ~ 2026-04-08
+
+## 1. Overview
+
+This report quantitatively compares the performance impact of connection storms during Non-TLS → TLS transition on Amazon ElastiCache for Valkey 8.2 and Redis OSS 7.2 Self-hosted environments, and provides a comprehensive summary of mitigation strategy effectiveness.
+
+### Test Objectives
+
+1. Quantitative measurement of TLS transition impact on connection storm performance
+2. Comparison of TLS performance between ElastiCache Valkey and Redis OSS Self-hosted
+3. Validation of mitigation strategies (preferred mode, Connection Pool, Shard increase)
+4. Cascading failure reproduction and mitigation validation
+
+---
+
+## 2. Test Environment
+
+### 2.1 ElastiCache for Valkey 8.2
+
+| Item | Specification |
+|------|---------------|
+| Engine | Valkey 8.2.0 |
+| Node Type | cache.r7g.large (2 vCPU, 13.07 GiB) |
+| Cluster Mode | Enabled |
+| Region | ap-northeast-2 |
+
+| Cluster | Shards | Config | TLS Mode |
+|---------|--------|--------|----------|
+| valkey-nontls-test | 1 | 1M + 1R | Disabled |
+| stviztlwuv2jozz | 2 | 2M + 2R | required → preferred |
+| valkey-tls-4shard | 4 | 4M + 4R | required |
+
+### 2.2 Redis OSS 7.2 Self-hosted
+
+| Item | Specification |
+|------|---------------|
+| Engine | Redis OSS 7.2.7 (BUILD_TLS=yes) |
+| Server Instance | r7g.large (2 vCPU, 16 GiB) × 3 |
+| TLS | Self-signed CA, tls-auth-clients no |
+
+| Cluster | Nodes | Hosts | TLS |
+|---------|-------|-------|-----|
+| Non-TLS | 3M + 3R | 1 host (10.11.62.234) | Disabled |
+| TLS | 3M + 3R | 2 hosts (10.11.35.38, 10.11.88.49) | Enabled |
+
+### 2.3 Common Client
+
+| Item | Specification |
+|------|---------------|
+| EC2 | c7g.xlarge (ARM64, 4 vCPU, 8 GiB) |
+| Location | Same VPC Private Subnet |
+| Rust | 1.94.1 |
+| redis crate | 0.27 (cluster, tls-rustls) |
+| Timeout | 15 seconds |
+| Storm mode | New ClusterClient per concurrent connection → PING |
+| Pool mode | Single ClusterClient warm-up then shared |
+
+---
+
+## 3. Full Result Data
+
+### 3.1 ElastiCache Valkey — Non-TLS Storm (1 shard, baseline)
+
+| Conns | Wall Time | Success Rate | Throughput |
+|-------|-----------|-------------|------------|
+| 10 | 10ms | 100% | 1,000 c/s |
+| 50 | 16ms | 100% | 3,125 c/s |
+| 100 | 19ms | 100% | 5,263 c/s |
+| 200 | 5.0s | 100% | 40 c/s |
+| 500 | 10.0s | 94.6% | 47 c/s |
+| 1,000 | 15.0s | 64.0% | 43 c/s |
+| 2,000 | 15.0s | 23.2% | 31 c/s |
+
+### 3.2 ElastiCache Valkey — TLS Storm (2 shard, required)
+
+| Conns | Wall Time | Success Rate | Throughput |
+|-------|-----------|-------------|------------|
+| 10 | 129ms | 100% | 78 c/s |
+| 50 | 199ms | 100% | 251 c/s |
+| 100 | 5.3s | 100% | 19 c/s |
+| 200 | 5.4s | 100% | 37 c/s |
+| 500 | 15.3s | 30.2% | 10 c/s |
+| 1,000 | 15.3s | 57.8% | 38 c/s |
+| 2,000 | 15.1s | 50.6% | 67 c/s |
+
+### 3.3 ElastiCache Valkey — TLS Pool (2 shard, required)
+
+| Conns | Wall Time | Success Rate | Throughput |
+|-------|-----------|-------------|------------|
+| 10 | 130ms | 100% | 77 c/s |
+| 50 | 184ms | 100% | 272 c/s |
+| 100 | 292ms | 100% | 342 c/s |
+| 200 | 10.4s | 100% | 19 c/s |
+| 500 | 15.3s | 36% | 12 c/s |
+| 1,000 | 15.3s | 51.6% | 34 c/s |
+| 2,000 | 15.1s | 36.1% | 48 c/s |
+
+### 3.4 ElastiCache Valkey — preferred Non-TLS Storm (2 shard)
+
+| Conns | Wall Time | Success Rate | Throughput |
+|-------|-----------|-------------|------------|
+| 10 | 22ms | 100% | 455 c/s |
+| 50 | 26ms | 100% | 1,923 c/s |
+| 100 | 5.1s | 100% | 20 c/s |
+| 200 | 10.1s | 90% | 18 c/s |
+| 500 | 15.0s | 1% | 0 c/s |
+| 1,000 | 15.0s | 0.9% | 1 c/s |
+| 2,000 | 15.0s | 0% | 0 c/s |
+
+### 3.5 ElastiCache Valkey — TLS Storm (4 shard, required)
+
+| Conns | Wall Time | Success Rate | Throughput |
+|-------|-----------|-------------|------------|
+| 10 | 354ms | 100% | 28 c/s |
+| 50 | 460ms | 100% | 109 c/s |
+| 100 | 5.5s | 100% | 18 c/s |
+| 200 | 15.1s | 38% | 5 c/s |
+| 500 | 15.4s | 32% | 10 c/s |
+| 1,000 | 15.2s | 60.7% | 40 c/s |
+| 2,000 | 15.0s | 26% | 35 c/s |
+
+### 3.6 Redis OSS 7.2 — Non-TLS Storm (3M+3R, 1 host)
+
+| Conns | Wall Time | Success Rate | Throughput |
+|-------|-----------|-------------|------------|
+| 10 | 16ms | 100% | 625 c/s |
+| 50 | 89ms | 100% | 562 c/s |
+| 100 | 60ms | 100% | 1,667 c/s |
+| 200 | 101ms | 100% | 1,980 c/s |
+| 500 | 153ms | 100% | 3,268 c/s |
+| 1,000 | 229ms | 100% | 4,367 c/s |
+| 2,000 | 415ms | 100% | 4,819 c/s |
+
+### 3.7 Redis OSS 7.2 — TLS Storm (3M+3R, 2 hosts)
+
+| Conns | Wall Time | Success Rate | Throughput |
+|-------|-----------|-------------|------------|
+| 10 | 113ms | 100% | 88 c/s |
+| 50 | 708ms | 100% | 71 c/s |
+| 100 | 919ms | 100% | 109 c/s |
+| 200 | 2.0s | 100% | 98 c/s |
+| 500 | 4.8s | 100% | 105 c/s |
+| 1,000 | 8.7s | 100% | 115 c/s |
+| 2,000 | 15.1s | 77% | 102 c/s |
+
+### 3.8 Redis OSS 7.2 — TLS Pool (3M+3R, 2 hosts)
+
+| Conns | Wall Time | Success Rate | Throughput |
+|-------|-----------|-------------|------------|
+| 10 | 111ms | 100% | 90 c/s |
+| 50 | 452ms | 100% | 111 c/s |
+| 100 | 916ms | 100% | 109 c/s |
+| 200 | 1.8s | 100% | 110 c/s |
+| 500 | 4.4s | 100% | 114 c/s |
+| 1,000 | 8.7s | 100% | 114 c/s |
+| 2,000 | 15.1s | 77% | 102 c/s |
+
+---
+
+## 4. Key Comparative Analysis
+
+### 4.1 ElastiCache Valkey vs Redis OSS — TLS Overhead
+
+#### 100 Concurrent Connections (Key Comparison)
+
+| Scenario | Wall Time | Success Rate | Throughput | Note |
+|----------|-----------|-------------|------------|------|
+| **Valkey Non-TLS Storm** | 19ms | 100% | 5,263 c/s | Baseline |
+| **Valkey TLS Storm** | 5.3s | 100% | 19 c/s | 279x slower |
+| Valkey TLS Pool | 292ms | 100% | 342 c/s | 18x improvement |
+| **Redis OSS Non-TLS Storm** | 60ms | 100% | 1,667 c/s | |
+| **Redis OSS TLS Storm** | 919ms | 100% | 109 c/s | 15x slower |
+| Redis OSS TLS Pool | 916ms | 100% | 109 c/s | No improvement |
+
+#### TLS Overhead Ratio Comparison
+
+| Conns | Valkey (TLS/Non-TLS) | Redis OSS (TLS/Non-TLS) |
+|-------|---------------------|------------------------|
+| 10 | 12.9x | 7.1x |
+| 50 | 12.4x | 8.0x |
+| 100 | 279x | 15.3x |
+| 500 | 1.5x (both timeout) | 31.4x |
+
+#### ElastiCache vs Self-hosted Difference Causes
+
+| Factor | ElastiCache | Redis OSS Self-hosted |
+|--------|------------|----------------------|
+| Proxy Layer | Configuration Endpoint proxy exists | Direct node access |
+| Connection Limits | Internal rate limiting | Default settings (relaxed) |
+| Network Hops | Proxy → Node (extra hop) | Client → Node (direct) |
+| 500 conns Success Rate | 30~95% | 100% |
+| Operational Burden | None (managed) | High (self-managed) |
+
+---
+
+## 5. Mitigation Strategy Evaluation
+
+### 5.1 Effectiveness Matrix
+
+| Strategy | Low (10~50) | Medium (100) | High (500+) | Complexity | Overall |
+|----------|-------------|-------------|-------------|------------|---------|
+| ① preferred + Non-TLS | ✅ 6~8x faster | ⚠️ No effect | ❌ Severe degradation | Low | Limited |
+| ② Connection Pool (Valkey) | ⚠️ Same | ✅ **18x improvement** | ⚠️ Slight improvement | Medium | **Top priority** |
+| ② Connection Pool (Redis OSS) | ⚠️ Same | ⚠️ No effect | ⚠️ Same | Medium | Limited |
+| ④ More Shards | ❌ 2~3x worse | ❌ No effect | ⚠️ Similar | High | Counterproductive |
+
+### 5.2 Connection Pool + Warm-up Detailed Validation
+
+> Target: ElastiCache Valkey 8.2, stviztlwuv2jozz (r7g.large, 2 shard, TLS required)
+
+**Test Principle:**
+```
+[Storm mode]  100 conns × 2 shards × 2 nodes = up to 400 TLS handshakes
+[Pool mode]   warm-up 1 time × 2 shards × 2 nodes = 4 TLS handshakes then reuse
+```
+
+**Full Range Comparison (TLS required, 2 shard):**
+
+| Conns | Storm Wall Time | Storm Success | Pool Wall Time | Pool Success | Improvement |
+|-------|----------------|--------------|----------------|-------------|-------------|
+| 10 | 129ms | 100% | 130ms | 100% | Same |
+| 50 | 199ms | 100% | 184ms | 100% | 1.1x |
+| **100** | **5.3s** | **100%** | **292ms** | **100%** | **18.2x** |
+| 200 | 5.4s | 100% | 10.4s | 100% | 0.5x (worse) |
+| 500 | 15.3s | 30.2% | 15.3s | 36% | +5.8%p |
+| 1,000 | 15.3s | 57.8% | 15.3s | 51.6% | -6.2%p |
+| 2,000 | 15.1s | 50.6% | 15.1s | 36.1% | -14.5%p |
+
+**Throughput Comparison:**
+
+| Conns | Storm Throughput | Pool Throughput | Ratio |
+|-------|-----------------|-----------------|-------|
+| **100** | **19 c/s** | **342 c/s** | **18x** |
+| 200 | 37 c/s | 19 c/s | 0.5x |
+| 500 | 10 c/s | 12 c/s | 1.2x |
+
+**Per-Range Analysis:**
+- **10~50 conns**: Total handshake count is low, no Pool advantage
+- **100 conns (key)**: Storm processes 100 × 4 nodes = 400 handshakes serially → 5.3s. Pool reuses after 4 warm-up handshakes → 292ms
+- **200+ conns**: Mutex contention in single ClusterClient's internal slot-based connection management. Pool becomes slower
+- **Conclusion**: Connection Pool is **most effective at medium concurrency (50~200)**
+
+### 5.3 Connection Pool Effect Difference (ElastiCache vs Redis OSS)
+
+| 100 conns | Storm | Pool | Improvement |
+|-----------|-------|------|-------------|
+| ElastiCache Valkey | 5.3s, 19 c/s | 292ms, 342 c/s | **18x** |
+| Redis OSS | 919ms, 109 c/s | 916ms, 109 c/s | **None** |
+
+- **ElastiCache**: Configuration Endpoint proxy manages connections; Pool warm-up connections are reused through proxy
+- **Redis OSS**: Direct node access; `get_connection()` may internally create new connections even in Pool mode
+- **redis crate 0.27 ClusterClient**: Limited connection pool management in sync mode
+
+---
+
+## 6. Cascading Failure Test Results (Retry + Backoff Validation)
+
+> Target: ElastiCache Valkey 8.2, stviztlwuv2jozz (r7g.large, 2 shard, TLS preferred)
+> Client: c7g.xlarge, Same VPC, 60-second limit
+
+### 6.1 Failure Scenario Structure
+
+```
+Frontend Pod failure → HPA scale-out → Mass Pod creation
+→ Per-Pod TLS connections created simultaneously
+→ Valkey TLS handshake limit exceeded → Timeouts
+→ App infinite retry (no backoff) → Connection attempts accumulate
+→ Half-completed TLS session memory accumulates → Memory 100% → Node unresponsive
+→ Failover → Failover target hit by same storm → Failure persists
+```
+
+### 6.2 Detailed Results by Scenario
+
+**Scenario 1: Failure Reproduction (500 pods, 10 retries, no backoff)**
+
+```
+  [  5s] attempts=501  ok=67   fail=1
+  [ 10s] attempts=933  ok=292  fail=433
+  [ 15s] attempts=1129 ok=467  fail=629
+  [ 20s] attempts=1162 ok=492  fail=662
+
+Total attempts: 1,170
+Success: 500 (100%), Fail: 670
+Amplification: 2.3x
+```
+
+- At 5s: 501 attempts with only 67 successes (13.4%)
+- 670 failed TLS handshakes put load on server memory
+- In production: unlimited retries → amplification 10x~100x
+
+**Scenario 2: Fail Fast (500 pods, no retry)**
+
+```
+  [  5s] attempts=500  ok=46   fail=2
+
+Total attempts: 500
+Success: 46 (9.2%), Fail: 454
+Amplification: 1.0x
+```
+
+- Exactly 500 attempts (no amplification)
+- 9.2% success but **no additional server load** → server gets recovery time
+
+**Scenario 3: Exponential Backoff (500 pods, 3 retries)**
+
+```
+  [  5s] attempts=500  ok=28   fail=8
+  [ 10s] attempts=972  ok=295  fail=472
+  [ 15s] attempts=1140 ok=483  fail=650
+
+Total attempts: 1,150
+Success: 500 (100%), Fail: 650
+Amplification: 2.3x
+```
+
+- Similar total attempts to Scenario 1 but **retries distributed over time**
+- Server gets breathing room → final **100% success**
+
+**Scenario 4: HPA Limit + Backoff (200 pods, 3 retries)**
+
+```
+  [  5s] attempts=200  ok=14   fail=8
+  [ 10s] attempts=386  ok=183  fail=186
+  [ 15s] attempts=403  ok=198  fail=203
+
+Total attempts: 403
+Success: 200 (100%), Fail: 203
+Amplification: 2.0x
+```
+
+- Total 403 attempts (**1/3 of Scenario 1**)
+- Server load **60% reduction** → minimal cascading failure risk
+
+### 6.3 Scenario Comparison
+
+**Server Load at 5 Seconds:**
+
+| Scenario | Attempts at 5s | Failures at 5s | Server Load |
+|----------|---------------|----------------|-------------|
+| 1. Reproduce (no backoff) | 501 | 434 | ❌ Maximum |
+| 2. Fail Fast (no retry) | 500 | 454 | ⚠️ High but one-time |
+| 3. Exponential backoff | 500 | 472 | ⚠️ Same initially, distributed later |
+| 4. HPA limit + backoff | 200 | 186 | ✅ **60% reduction** |
+
+**Total Connection Attempts (Cumulative Server Load):**
+
+| Scenario | Total | Failures | Amplification | Time | Success Rate |
+|----------|-------|----------|---------------|------|-------------|
+| 1. Reproduce | 1,170 | 670 | 2.3x | ~20s | 100% (670 failures) |
+| 2. Fail Fast | 500 | 454 | 1.0x | ~5s | 9.2% |
+| 3. Backoff | 1,150 | 650 | 2.3x | ~15s | **100%** |
+| 4. HPA + Backoff | 403 | 203 | 2.0x | ~15s | **100%** |
+
+### 6.4 Key Lessons
+
+1. **No infinite retries** — No retry = 1.0x amplification; 10 retries = 2.3x (production: 10x~100x)
+2. **Fail Fast protects the server** — 9.2% success but server gets recovery time. If server dies, all pods fail
+3. **Exponential backoff is essential** — Distributes retries over time, reduces instantaneous load, achieves 100% success
+4. **HPA rate limiting is most effective** — Limiting concurrent pods reduces server load by 60%, 100% success
+
+### 6.5 Differences from Real Failures
+
+This test was performed with a 60-second limit. Differences from real failure environments:
+- Real: Unlimited retries → amplification 10x~100x
+- Real: Connections per Python process → CPU count × Pod count = more concurrent connections
+- Real: Prolonged duration → half-completed TLS session memory accumulation → OOM
+- This test: 60-second limit prevented reaching OOM
+
+---
+
+## 7. Final Conclusions
+
+### 7.1 TLS Connection Storm is Engine-Agnostic
+
+- Both ElastiCache Valkey 8.2 and Redis OSS 7.2 experience connection storm performance degradation with TLS
+- Root cause is **TLS handshake CPU cost**, not engine differences
+- ElastiCache has additional bottleneck from proxy layer, but trade-off with managed service benefits
+
+### 7.2 Recommended Actions (Priority Order)
+
+| Priority | Action | Effect | Target |
+|----------|--------|--------|--------|
+| 1 | **Connection Pool + Warm-up** | 18x improvement at medium scale (ElastiCache) | Code change |
+| 2 | **Retry limit + Exponential backoff** | Prevent amplification, protect server | 1 line of code |
+| 3 | **Staggered Reconnection** | Distribute simultaneous handshakes over time | Architecture |
+| 4 | **HPA rate limiting** | Limit concurrent pod count | YAML change |
+| 5 | **Readiness Probe with connection status** | Block traffic to unconnected pods | YAML change |
+
+### 7.3 Fundamental Solution
+
+```
+[Problem] During deployment: N pods × M shards × 2 nodes = N×M×2 simultaneous TLS handshakes
+
+[Solutions]
+1. Connection Pool: Limit handshakes to once at app startup → 18x improvement
+2. Staggered Reconnection: Distribute simultaneous handshakes over time
+3. Envoy Sidecar: Multiplex N app connections → few TLS connections
+4. HPA rate limiting: Reduce N itself by limiting concurrent pod creation
+```
+
+**The key is not disabling TLS, but minimizing the number of TLS handshakes.**
+
+---
+
+## 8. Infrastructure Info
+
+### ElastiCache Clusters
+
+| Cluster | Endpoint |
+|---------|----------|
+| valkey-nontls-test | valkey-nontls-test.khojwc.clustercfg.apn2.cache.amazonaws.com:6379 |
+| stviztlwuv2jozz | clustercfg.stviztlwuv2jozz.khojwc.apn2.cache.amazonaws.com:6379 |
+| valkey-tls-4shard | clustercfg.valkey-tls-4shard.khojwc.apn2.cache.amazonaws.com:6379 |
+
+### Redis OSS Self-hosted EC2
+
+| Server | Instance ID | IP | Role |
+|--------|------------|-----|------|
+| server-1 | i-083ea03e8a15bb568 | 10.11.62.234 | Non-TLS (3M+3R) |
+| server-2 | i-0922dfe836d701437 | 10.11.35.38 | TLS shard (AZ-a) |
+| server-3 | i-0b4afd836fb0046ab | 10.11.88.49 | TLS shard (AZ-b) |
+
+### Client EC2
+
+| Instance | Instance ID | Type |
+|----------|------------|------|
+| valkey-conn-storm-test | i-021aa6df35a1d56ab | c7g.xlarge |
+
+### Security Groups
+
+| SG | ID | Purpose |
+|----|-----|---------|
+| Valkey-SG | sg-0a3c3d2faec77dc0b | ElastiCache clusters |
+| valkey-test-ec2-sg | sg-0a7cdb6f09726515d | Client EC2 |
+| redis-oss-test-sg | sg-010a561677d490581 | Redis OSS server EC2 |
